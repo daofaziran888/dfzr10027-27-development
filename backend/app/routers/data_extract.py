@@ -5,14 +5,16 @@ import csv
 import io
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
+from app.schemas import ActionPayload, ActionResult, DeliveryActionPayload, EntryPayload, PageResult, SourceUserUpdate
 from app.services.data_extract import DataExtractService
+from app.services.data_extract_delivery import DataExtractDeliveryService, DeliveryError
 
 router = APIRouter(prefix="/api/data_extract", tags=["数据提取"])
 
 service = DataExtractService()
+delivery_service = DataExtractDeliveryService()
 
 LIST_FIELDS = ["任务编号", "来源数据集", "筛选条件", "字段列表", "排序规则", "分页方式", "输出格式", "提取上限"]
 STATUSES = ["草稿", "提取中", "已完成", "已取消"]
@@ -90,3 +92,104 @@ def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
+
+
+# ---------------------------------------------------------------------------
+# 分段交付：来源成员、交付版本、断点分段、下载与活动报表
+# ---------------------------------------------------------------------------
+
+def _error(error: DeliveryError) -> JSONResponse:
+    """业务约束不满足时返回可读说明；已存在的交付版本一并带回，便于页面继续操作。"""
+    return JSONResponse(
+        status_code=400,
+        content={"ok": False, "message": error.message, "entry": error.delivery},
+    )
+
+
+@router.get("/{entry_id}/source-users")
+def list_source_users(entry_id: int) -> dict[str, object]:
+    """查看来源数据集的当前成员，便于核对消费额更正后的分布。"""
+    try:
+        delivery_service._task(entry_id)
+    except DeliveryError as error:
+        raise HTTPException(status_code=404, detail=error.message) from None
+    rows = delivery_service.source_users()
+    return {"items": rows, "total": len(rows), "dataset": "cohort_users"}
+
+
+@router.patch("/{entry_id}/source-users/{user_id}")
+def update_source_user(entry_id: int, user_id: str, payload: SourceUserUpdate) -> ActionResult:
+    """更正来源成员字段（如消费额）；已冻结的交付快照不会随之改变。"""
+    try:
+        delivery_service._task(entry_id)
+        updated = delivery_service.update_source_user(
+            user_id, payload.model_dump(exclude_none=True))
+    except DeliveryError as error:
+        return ActionResult(ok=False, message=error.message)
+    return ActionResult(ok=True, message=f"来源成员 {user_id} 已更新", entry=updated)
+
+
+@router.get("/{entry_id}/deliveries", response_model=dict)
+def list_deliveries(entry_id: int) -> dict[str, object]:
+    """列出该任务下的全部交付版本，含业务截止时间与确认/未送达分段计数。"""
+    try:
+        items = delivery_service.list_deliveries(entry_id)
+    except DeliveryError as error:
+        raise HTTPException(status_code=404, detail=error.message) from None
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/{entry_id}/deliveries", response_model=dict)
+def start_delivery(entry_id: int, payload: dict[str, object] | None = None) -> dict[str, object]:
+    """启动分段交付：冻结来源快照、生成断点分段与计数。"""
+    try:
+        delivery = delivery_service.start_delivery(entry_id, payload)
+    except DeliveryError as error:
+        return _error(error)
+    return JSONResponse(status_code=201, content={"ok": True, "message": "分段交付已启动", "entry": delivery})
+
+
+@router.get("/{entry_id}/deliveries/{delivery_id}", response_model=dict)
+def get_delivery(entry_id: int, delivery_id: int) -> dict[str, object]:
+    """读取单个交付版本的分段状态与操作留痕。"""
+    try:
+        return delivery_service.delivery_detail(entry_id, delivery_id)
+    except DeliveryError as error:
+        raise HTTPException(status_code=404, detail=error.message) from None
+
+
+@router.post("/{entry_id}/deliveries/{delivery_id}/actions", response_model=dict)
+def run_delivery_action(entry_id: int, delivery_id: int, payload: DeliveryActionPayload) -> dict[str, object]:
+    """确认分段、中断交付或恢复交付；中断只影响未确认分段。"""
+    try:
+        delivery, message = delivery_service.run_action(
+            entry_id, delivery_id, payload.action, payload.segment_seq)
+    except DeliveryError as error:
+        return _error(error)
+    return JSONResponse(content={"ok": True, "message": message, "entry": delivery})
+
+
+@router.get("/{entry_id}/deliveries/{delivery_id}/download")
+def download_delivery(
+    entry_id: int,
+    delivery_id: int,
+    segment: int | None = Query(default=None, description="只下载指定分段；不传则下载全部已确认分段"),
+) -> StreamingResponse:
+    """下载交付文件：只包含已确认分段，文件内 user_id 唯一。"""
+    try:
+        content, filename, headers = delivery_service.build_csv(entry_id, delivery_id, segment)
+    except DeliveryError as error:
+        return _error(error)
+    disposition = f'attachment; filename="{filename}"'
+    return StreamingResponse(
+        iter([content]), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": disposition, **headers})
+
+
+@router.get("/{entry_id}/deliveries/{delivery_id}/report", response_model=dict)
+def delivery_report(entry_id: int, delivery_id: int) -> dict[str, object]:
+    """活动交付报表：按已确认成员汇总人数与 LTV，并给出截止时间后的来源漂移。"""
+    try:
+        return delivery_service.report(entry_id, delivery_id)
+    except DeliveryError as error:
+        raise HTTPException(status_code=404, detail=error.message) from None

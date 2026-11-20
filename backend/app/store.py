@@ -10,14 +10,23 @@ from app.seed import SEED_ROWS
 
 
 class Store:
+    INTERNAL_TABLES = ("_pipeline_results", "_cohort_deliveries", "_cohort_user_changes")
+
     def __init__(self) -> None:
-        self._tables: dict[str, list[dict[str, Any]]] = {
+        self._tables: dict[str, list[dict[str, Any]]] = {}
+        self.reset()
+
+    def reset(self) -> None:
+        """原地重建表内容：服务实例持有的是同一个 store 对象，不能换引用。"""
+        self._tables = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
-        self._tables.setdefault("_pipeline_results", [])
+        for name in self.INTERNAL_TABLES:
+            self._tables.setdefault(name, [])
 
     def module_names(self) -> list[str]:
-        return sorted(self._tables)
+        """业务模块列表；下划线开头的内部表（管道产物、交付版本等）不参与模块统计。"""
+        return sorted(name for name in self._tables if not name.startswith("_"))
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
@@ -51,6 +60,5 @@ store = Store()
 
 
 def reset_store() -> None:
-    """重新初始化全局 store，用于测试隔离。"""
-    global store
-    store = Store()
+    """重新初始化全局 store 的内容，用于测试隔离；保持对象引用不变。"""
+    store.reset()

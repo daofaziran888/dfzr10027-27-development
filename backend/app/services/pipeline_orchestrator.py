@@ -270,6 +270,61 @@ def run_cohort_extract_pipeline(rule: dict[str, Any] | None = None) -> dict[str,
     return result
 
 
+def publish_delivery_report_to_report_gen(
+    entry_id: int, delivery_id: int, report_code: str | None = None,
+) -> dict[str, Any]:
+    """把一次真实分段交付的活动报表挂到 report_gen，供人群报表复用同一份交付结果。
+
+    报表人数与 LTV 直接取自 delivery.report()（只算已确认分段），并带上业务截止时间与版本，
+    保证报表和下载文件能互相复核。
+    """
+    from app.services.data_extract_delivery import (
+        DataExtractDeliveryService,
+        DeliveryError,
+    )
+
+    delivery_service = DataExtractDeliveryService()
+    try:
+        report = delivery_service.report(entry_id, delivery_id)
+    except DeliveryError as error:
+        return {"ok": False, "message": error.message, "report": None}
+
+    rows = store.rows("report_gen")
+    code = report_code or f"REPO-{report['task_code']}-{report['version']}"
+    existing = next((row for row in rows if row.get("报表编号") == code), None)
+    values = {
+        "报表编号": code,
+        "报表类型": "人群报表",
+        "数据范围": (
+            f"{report['dataset']} · {report['filter']} · 交付 {report['version']} · "
+            f"业务截止 {report['business_cutoff_at']}"
+        ),
+        "包含图表": "人数,LTV,分段确认情况",
+        "生成周期": "每次交付完成后",
+        "输出格式": "csv",
+        "分发渠道": "人群报表",
+        "下次生成": "按需",
+    }
+    if existing is None:
+        row = {"id": max((int(item.get("id", 0)) for item in rows), default=0) + 1}
+        row.update(values)
+        row.update({"status": "已生成", "pending": False, "abnormal": False})
+        rows.append(row)
+    else:
+        row = existing
+        row.update(values)
+        row["status"] = "已生成"
+        row["pending"] = False
+    row["交付报表"] = report
+
+    _write_result("cohort_delivery_report", {
+        "source_modules": ["data_extract", "report_gen"],
+        "target_module": "report_gen",
+        "payload": report,
+    })
+    return {"ok": True, "message": f"人群报表 {code} 已复用交付 {report['version']} 的结果", "report": report, "entry": row}
+
+
 # ---------------------------------------------------------------------------
 # Pipeline 5: experiment -> stat_model -> data_mart
 # ---------------------------------------------------------------------------

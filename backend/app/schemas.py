@@ -35,6 +35,24 @@ class ActionPayload(BaseModel):
     remark: str | None = None
 
 
+class DeliveryActionPayload(BaseModel):
+    """分段交付动作：确认/中断针对具体分段，恢复针对整个交付版本。"""
+
+    action: str
+    segment_seq: int | None = None
+    remark: str | None = None
+
+
+class SourceUserUpdate(BaseModel):
+    """来源成员的更正字段；只允许改消费额等可编辑业务字段。"""
+
+    ltv: float | None = None
+    region: str | None = None
+    channel: str | None = None
+    tag: str | None = None
+    last_order_date: str | None = None
+
+
 
 class MetricDefEntry(BaseModel):
     """业务指标明细结构。"""

@@ -75,5 +75,22 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 分段交付（`data_extract`）
+
+提取任务除了登记与 CSV 清单，还支持从来源数据集 `cohort_users` 导出分群成员的分段交付：
+
+1. `POST /api/data_extract/{id}/deliveries` 启动交付：按任务的筛选口径解析条件，
+   冻结一份来源快照并记录 `business_cutoff_at`（业务截止时间），再按分段大小切出断点分段。
+2. `POST /api/data_extract/{id}/deliveries/{delivery_id}/actions` 推进交付：
+   `确认分段`（带 `segment_seq`）、`中断交付`、`恢复交付`。中断只把未确认分段标记为「未送达」，
+   已确认分段保持独立口径；恢复只按原快照续传，不重新查询来源。
+3. `GET .../download` 下载交付文件：只含已确认分段且按 `user_id` 去重；
+   响应头带 `X-Delivery-Version`、`X-Delivery-Status`、`X-Business-Cutoff`。
+4. `GET .../report` 活动交付报表：只按已确认范围汇总人数与 LTV，并给出实际采用的门槛、
+   截止后的来源漂移（不并入报表）以及文件复核（应有行数 / 校验码 / 最近下载）。
+5. `POST /api/pipeline/cohort-delivery-report?entry_id=&delivery_id=` 把这份交付结果复用到人群报表。
+6. `PATCH /api/data_extract/{id}/source-users/{user_id}` 更正来源成员（如消费额）；
+   已冻结的交付快照不会随之改变，需要纳入更正请启动新的交付版本。
+
 领域：数据工程
 子方向：数据分析与数据应用

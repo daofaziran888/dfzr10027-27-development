@@ -6,6 +6,7 @@ from fastapi import APIRouter, Query
 from app.schemas import ActionResult
 from app.services.pipeline_orchestrator import (
     list_pipeline_results,
+    publish_delivery_report_to_report_gen,
     run_all_pipelines,
     run_attribution_compare_pipeline,
     run_cohort_extract_pipeline,
@@ -58,6 +59,20 @@ def trigger_cube(
 def trigger_cohort_extract() -> ActionResult:
     result = run_cohort_extract_pipeline()
     return ActionResult(ok=True, message="分群提取管道已执行", entry=result)
+
+
+@router.post("/cohort-delivery-report", response_model=ActionResult)
+def trigger_cohort_delivery_report(
+    entry_id: int = Query(description="数据提取任务 id"),
+    delivery_id: int = Query(description="交付版本 id"),
+    report_code: str | None = Query(default=None, description="人群报表编号，默认按任务号与版本生成"),
+) -> ActionResult:
+    """把真实分段交付的结果复用到人群报表，人数与 LTV 以已确认分段为准。"""
+    outcome = publish_delivery_report_to_report_gen(entry_id, delivery_id, report_code)
+    return ActionResult(
+        ok=bool(outcome["ok"]), message=str(outcome["message"]),
+        entry=outcome.get("entry") or outcome.get("report"),
+    )
 
 
 @router.post("/experiment-stat", response_model=ActionResult)
